@@ -1,9 +1,11 @@
+import dotenv from "dotenv";
 import express from "express";
-import fs from "fs";
-import path from "path";
+import { connectDB } from "./db/connection.js";
+import CheckinState from "./models/checkinState.js";
+
+dotenv.config();
 
 const app = express();
-const STATE_FILE = path.join(process.cwd(), "state.json");
 
 const CONFIG = {
   apiBase: "https://brained-leaveledger-api.brained.in/api/forms",
@@ -37,16 +39,26 @@ function locationString() {
   return `${CONFIG.latitude}, ${CONFIG.longitude}`;
 }
 
-function loadState() {
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch {
-    return {};
-  }
+async function getState(dateKey) {
+  return CheckinState.findOne({
+    employeeId: CONFIG.employeeId,
+    dateKey,
+  }).lean();
 }
 
-function saveState(state) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+async function saveCheckInState(dateKey, checkInId) {
+  await CheckinState.findOneAndUpdate(
+    { employeeId: CONFIG.employeeId, dateKey },
+    { checkInId },
+    { upsert: true, new: true }
+  );
+}
+
+async function clearState(dateKey) {
+  await CheckinState.deleteOne({
+    employeeId: CONFIG.employeeId,
+    dateKey,
+  });
 }
 
 function getHeaders() {
@@ -95,17 +107,17 @@ async function createCheckIn() {
 
   const recordId = extractRecordId(data);
   if (recordId) {
-    saveState({ checkInId: recordId, dateKey });
+    await saveCheckInState(dateKey, recordId);
   }
 
   return data;
 }
 
 async function updateCheckOut() {
-  const state = loadState();
   const today = getDateKey();
+  const state = await getState(today);
 
-  if (!state.checkInId || state.dateKey !== today) {
+  if (!state?.checkInId) {
     throw new Error("No check-in record found for today");
   }
 
@@ -130,7 +142,7 @@ async function updateCheckOut() {
     throw new Error(`Check-out API failed: ${JSON.stringify(data)}`);
   }
 
-  saveState({});
+  await clearState(today);
   return data;
 }
 
@@ -154,10 +166,10 @@ app.post("/checkin", async (req, res) => {
 
   try {
     if (hour < CONFIG.checkInBeforeHour) {
-      const state = loadState();
       const today = getDateKey();
+      const state = await getState(today);
 
-      if (state.checkInId && state.dateKey === today) {
+      if (state?.checkInId) {
         console.log("Check-in already recorded for today");
         return res.json({
           success: true,
@@ -195,6 +207,14 @@ app.post("/checkin", async (req, res) => {
   }
 });
 
-app.listen(3000, () => {
-  console.log("Running on port 3000");
+async function start() {
+  await connectDB();
+  app.listen(3000, () => {
+    console.log("Running on port 3000");
+  });
+}
+
+start().catch((error) => {
+  console.error("Failed to start server:", error.message);
+  process.exit(1);
 });
